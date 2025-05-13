@@ -1,0 +1,148 @@
+import csv
+import requests
+from requests.auth import HTTPBasicAuth
+from config import API_KEY
+from datetime import datetime
+
+# Configurações
+TOKEN = API_KEY
+BASE_URL = "https://SUA_URL_BASE.freshservice.com/api/v2"
+INPUT_FILE = "users.csv"
+
+
+# Função para buscar o ID do usuário por e-mail
+def get_user_id_by_email(email):
+    try:
+        # Primeira tentativa: buscar nos requesters
+        url_requesters = f"{BASE_URL}/requesters?query=\"primary_email:'{email}'\""
+        print(f"Request URL (Requesters): {url_requesters}")
+        response = requests.get(
+            url_requesters,
+            auth=HTTPBasicAuth(TOKEN, 'X'),
+            headers={'Content-Type': 'application/json'},
+            verify=False
+        )
+        print(f"Response Status Code (Requesters): {response.status_code}")
+        print(f"Response Content (Requesters): {response.text}")
+        response.raise_for_status()
+
+        data = response.json()
+        if data.get("requesters"):
+            return data["requesters"][0]["id"]
+
+        # Segunda tentativa: buscar nos agents
+        url_agents = f"{BASE_URL}/agents?query=\"email:'{email}'\""
+        print(f"Request URL (Agents): {url_agents}")
+        response = requests.get(
+            url_agents,
+            auth=HTTPBasicAuth(TOKEN, 'X'),
+            headers={'Content-Type': 'application/json'},
+            verify=False
+        )
+        print(f"Response Status Code (Agents): {response.status_code}")
+        print(f"Response Content (Agents): {response.text}")
+        response.raise_for_status()
+
+        data = response.json()
+        if data.get("agents"):
+            return data["agents"][0]["id"]
+
+        raise ValueError(f"Usuário com e-mail {email} não encontrado em requesters nem agents.")
+
+    except requests.exceptions.HTTPError as e:
+        print(f"Erro ao buscar usuário: {e}")
+        raise
+
+
+# Função para validar e formatar campos
+def validate_and_format_data(user_data):
+    # Formatar datas para ISO8601
+    for date_field in ["allocated_date", "first_used", "last_used"]:
+        if not user_data.get(date_field):  # Se o campo estiver vazio ou None
+            # Definir a data atual no formato ISO8601
+            user_data[date_field] = datetime.now().isoformat() + "Z"
+        else:
+            try:
+                # Validar se a data é ISO8601
+                datetime.fromisoformat(user_data[date_field])
+            except ValueError:
+                try:
+                    # Tentar converter a data para ISO8601
+                    user_data[date_field] = datetime.strptime(
+                        user_data[date_field], "%d/%m/%Y"
+                    ).isoformat() + "Z"
+                except ValueError:
+                    print(f"Data inválida no campo {date_field}, ignorando: {user_data[date_field]}")
+                    user_data[date_field] = None  # Definir como None quando não for válido
+
+    # Validar o campo source
+    if not user_data["source"] or len(user_data["source"]) > 50:
+        print(f"Campo 'source' inválido, definindo como 'Desconhecido'. Valor atual: {user_data['source']}")
+        user_data["source"] = "Desconhecido"
+
+    return user_data
+
+
+# Função para adicionar usuários a um software
+def add_users_to_software(software_id, users_data):
+    try:
+        url = f"{BASE_URL}/applications/{software_id}/users"
+        payload = {"application_users": users_data}
+        response = requests.post(
+            url,
+            auth=HTTPBasicAuth(TOKEN, 'X'),
+            headers={'Content-Type': 'application/json'},
+            json=payload,
+            verify=False
+        )
+        print(f"Response Status Code (Add Users): {response.status_code}")
+        print(f"Response Content (Add Users): {response.text}")
+        response.raise_for_status()
+        print(f"Usuários adicionados ao software {software_id}: {response.json()}")
+        return response.json()
+    except requests.exceptions.HTTPError as e:
+        print(f"Erro ao adicionar usuários ao software {software_id}: {e}")
+        raise
+
+
+# Função para processar o arquivo CSV
+def process_csv(filename):
+    users_by_software = {}
+
+    with open(filename, mode="r", encoding="utf-8") as file:
+        reader = csv.DictReader(file)
+        for row in reader:
+            email = row["email"]
+            try:
+                user_id = get_user_id_by_email(email)
+                software_id = row["software_id"]
+                user_data = {
+                    "user_id": user_id,
+                    "license_id": int(row["license_id"]) if row["license_id"] else None,
+                    "allocated_date": row["allocated_date"],
+                    "first_used": row["first_used"],
+                    "last_used": row["last_used"],
+                    "source": row["source"]
+                }
+                # Validar e formatar os campos
+                user_data = validate_and_format_data(user_data)
+
+                if software_id not in users_by_software:
+                    users_by_software[software_id] = []
+                users_by_software[software_id].append(user_data)
+            except ValueError as e:
+                print(e)
+
+    return users_by_software
+
+
+# Execução do script
+if __name__ == "__main__":
+    print("Iniciando adicionar usuários em lote...")
+    try:
+        users_by_software = process_csv(INPUT_FILE)
+        for software_id, users in users_by_software.items():
+            add_users_to_software(software_id, users)
+    except Exception as e:
+        print(f"Um erro ocorreu: {e}")
+    print("Processo completado.")
